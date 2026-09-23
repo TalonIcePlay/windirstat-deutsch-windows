@@ -205,4 +205,3 @@ Je nach Release stehen verschiedene Pakete zur Verfügung:
 Dieses Projekt basiert auf **WinDirStat** und steht unter der entsprechenden Open-Source-Lizenz.
 
 Beachte die Lizenz- und Urheberrechtsangaben des ursprünglichen Projekts, bevor du eine modifizierte Version weiterverbreitest.
-/
