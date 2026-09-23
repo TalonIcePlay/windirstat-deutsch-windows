@@ -1,0 +1,99 @@
+name: Publish releases to WinGet and Chocolatey
+on:
+  release:
+    types: [released]
+permissions:
+  contents: read
+jobs:
+  get-version:
+    runs-on: windows-latest
+    outputs:
+      version: ${{ steps.get-version.outputs.version }}
+      skip: ${{ steps.get-version.outputs.skip }}
+    steps:
+      - name: Get version
+        id: get-version
+        run: |
+          if ("${{ github.ref_name }}" -imatch "^release/")
+          {
+              $VERSION="${{ github.ref_name }}" -ireplace '^release/v?'
+              "version=$VERSION" >> $env:GITHUB_OUTPUT
+              "skip=false" >> $env:GITHUB_OUTPUT
+          }
+          else
+          {
+              "skip=true" >> $env:GITHUB_OUTPUT
+          }
+        shell: pwsh
+
+  publish-winget:
+    needs: get-version
+    if: ${{ needs.get-version.outputs.skip != 'true' }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cargo-bins/cargo-binstall@e00d2c94cc0067b77737821097a62d91c0301baa # v1.21.1
+        with:
+          version: v1.21.1
+      - name: Install Komac 2.16.0
+        # This version writes --output manifests before --dry-run exits, allowing the locale correction below.
+        run: |
+          cargo binstall komac@2.16.0 --no-confirm
+          if ((komac --version) -ne "komac 2.16.0") { throw "Unexpected Komac version." }
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - name: Publish corrected WinGet manifests
+        run: |
+          $Parameters = @{
+              PackageIdentifier = "WinDirStat.WinDirStat"
+              PackageVersion = "${{ needs.get-version.outputs.version }}"
+              ReleaseRepository = "${{ github.repository }}"
+              ReleaseTag = "${{ github.ref_name }}"
+              ReleaseNotesUrl = "https://github.com/windirstat/windirstat/blob/master/CHANGELOG.md" +
+                  "#windirstat-${{ needs.get-version.outputs.version }}"
+          }
+          .\.github\scripts\Publish-WinGetPackage.ps1 @Parameters
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.WINGET_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.WINGET_TOKEN }}
+          KOMAC_FORK_OWNER: ${{ github.repository_owner }}
+
+  publish-chocolatey:
+    needs: get-version
+    if: ${{ needs.get-version.outputs.skip != 'true' }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download release MSI assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "${{ github.ref_name }}" --pattern "WinDirStat-x86.msi" --pattern "WinDirStat-x64.msi" --dir publish --clobber
+          $missing = "publish\WinDirStat-x86.msi", "publish\WinDirStat-x64.msi" | Where-Object { -not (Test-Path -LiteralPath $_) }
+          if ($missing) { throw "Missing release asset(s): $($missing -join ', ')" }
+        shell: pwsh
+      - name: Build Chocolatey package
+        run: |
+          Set-Location setup\chocolatey
+          .\update.cmd
+          if ($LASTEXITCODE -ne 0) { throw "update.cmd failed with exit code $LASTEXITCODE." }
+
+          [xml]$nuspec = Get-Content -LiteralPath WinDirStat.nuspec
+          $releaseVersion = "${{ needs.get-version.outputs.version }}"
+          if ($nuspec.package.metadata.version -ne $releaseVersion)
+          {
+              throw "Chocolatey package version '$($nuspec.package.metadata.version)' does not match release tag '$releaseVersion'."
+          }
+
+          Remove-Item -Path *.nupkg -Force -ErrorAction SilentlyContinue
+          choco pack
+        shell: pwsh
+      - name: Push Chocolatey package
+        env:
+          CHOCOLATEY_API_KEY: ${{ secrets.CHOCOLATEY_API_KEY }}
+        run: |
+          $package = Get-ChildItem -LiteralPath setup\chocolatey -Filter *.nupkg | Select-Object -First 1 -ExpandProperty FullName
+          choco push $package --source https://push.chocolatey.org/ --api-key $env:CHOCOLATEY_API_KEY
+        shell: pwsh

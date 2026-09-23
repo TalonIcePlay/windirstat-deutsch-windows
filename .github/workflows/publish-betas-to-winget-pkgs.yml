@@ -1,0 +1,55 @@
+name: Publish betas to WinGet
+on:
+  release:
+    types: [published]
+jobs:
+  publish:
+    runs-on: windows-latest
+    steps:
+      - name: Get version
+        id: get-version
+        run: |
+          Write-Host "github.ref_name: ${{ github.ref_name }}"
+          Write-Host "github.ref: ${{ github.ref }}"        
+          # Finding the version from beta tag name
+          if ("${{ github.ref_name }}" -imatch "^beta/")
+          {
+              $VERSION="${{ github.ref_name }}" -ireplace '^beta/v?' -ireplace '/', '.'
+              "version=$VERSION" >> $env:GITHUB_OUTPUT
+              "skip=false" >> $env:GITHUB_OUTPUT
+          }
+          else
+          {
+              "skip=true" >> $env:GITHUB_OUTPUT
+          }
+        shell: pwsh
+      - uses: actions/checkout@v4
+        if: ${{ steps.get-version.outputs.skip != 'true' }}
+      - uses: cargo-bins/cargo-binstall@e00d2c94cc0067b77737821097a62d91c0301baa # v1.21.1
+        if: ${{ steps.get-version.outputs.skip != 'true' }}
+        with:
+          version: v1.21.1
+      - name: Install Komac 2.16.0
+        if: ${{ steps.get-version.outputs.skip != 'true' }}
+        # This version writes --output manifests before --dry-run exits, allowing the locale correction below.
+        run: |
+          cargo binstall komac@2.16.0 --no-confirm
+          if ((komac --version) -ne "komac 2.16.0") { throw "Unexpected Komac version." }
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - name: Publish corrected WinGet manifests
+        if: ${{ steps.get-version.outputs.skip != 'true' }}
+        run: |
+          $Parameters = @{
+              PackageIdentifier = "WinDirStat.WinDirStat.Beta"
+              PackageVersion = "${{ steps.get-version.outputs.version }}"
+              ReleaseRepository = "${{ github.repository }}"
+              ReleaseTag = "${{ github.ref_name }}"
+          }
+          .\.github\scripts\Publish-WinGetPackage.ps1 @Parameters
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.WINGET_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.WINGET_TOKEN }}
+          KOMAC_FORK_OWNER: ${{ github.repository_owner }}
